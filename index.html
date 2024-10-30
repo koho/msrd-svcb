@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+    <title>远程桌面</title>
+    <link rel="icon" href="/favicon.ico">
+    <link rel="manifest" href="/manifest.json"/>
+</head>
+<body style="padding-top: 32px; padding-left: 4px; padding-right: 4px;">
+<div class="container" style="max-width: 400px">
+    <div style="text-align: center">
+        <img src="logo.png" width="64" style="display: block; margin: 0 auto"/>
+        <h1 class="mb-4 mt-3" style="font-size: 24px; font-weight: 600;">
+            远程桌面
+        </h1>
+    </div>
+    <form id="rd">
+        <div class="form-floating mb-3">
+            <input type="text" class="form-control" id="domain" placeholder="example.com">
+            <label for="domain">域名</label>
+        </div>
+        <div class="input-group mb-3">
+            <span class="input-group-text">@</span>
+            <div class="form-floating">
+                <input type="text" class="form-control" id="username" placeholder="">
+                <label for="username">用户名</label>
+            </div>
+        </div>
+        <div class="mb-3 form-check">
+            <input type="checkbox" class="form-check-input" id="remember">
+            <label class="form-check-label" for="remember" style="user-select: none">记住我</label>
+        </div>
+        <button type="submit" class="btn btn-primary mb-3" style="width: 100%; font-size: 20px">访问</button>
+        <div id="address"></div>
+    </form>
+</div>
+<script>
+    function readU16(arr, i) {
+        return [arr[i] << 8 | arr[i + 1], i + 2]
+    }
+
+    function readTargetName(arr, i) {
+        if (arr[i] === 0) {
+            return [".", i + 1];
+        }
+        const labels = [];
+        while ((len = arr[i]) !== 0) {
+            i++;
+            labels.push(String.fromCharCode(...arr.slice(i, i + len)));
+            i += len;
+        }
+        return [labels.join("."), i + 1]
+    }
+
+    function parseSVCB(arr) {
+        [priority, i] = readU16(arr, 2);
+        [targetName, i] = readTargetName(arr, i);
+        let ip = "";
+        let port = 0;
+        while (i < arr.length) {
+            [key, i] = readU16(arr, i);
+            [len, i] = readU16(arr, i);
+            switch (key) {
+                case 3:
+                    [port, _] = readU16(arr, i);
+                    break;
+                case 4:
+                    ip = [arr[i].toString(), arr[i + 1].toString(), arr[i + 2].toString(), arr[i + 3].toString()].join(".");
+                    break;
+                default:
+                    break;
+            }
+            i += len;
+        }
+        return {
+            priority,
+            targetName,
+            ip,
+            port,
+        }
+    }
+
+    function showMessage(message, type, additional) {
+        const address = document.getElementById('address');
+        address.innerHTML = [
+            `<div class="alert alert-${type} alert-dismissible" role="alert">`,
+            `   <div style="display: flex; justify-content: space-between; flex-flow: row wrap;">${message}${additional}</div>`,
+            '   <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close" onclick="hideMessage()"></button>',
+            '</div>'
+        ].join('');
+    }
+
+    function hideMessage() {
+        document.getElementById('address').innerHTML = '';
+    }
+
+    const urlParams = new URLSearchParams(window.location.search);
+    document.getElementById("domain").value = urlParams.get('domain') || localStorage.getItem("domain");
+    document.getElementById("username").value = urlParams.get('username') || localStorage.getItem("username");
+    document.getElementById("remember").checked = localStorage.length > 0;
+    document.getElementById('rd').addEventListener('submit', function (event) {
+        hideMessage();
+        event.preventDefault();
+        if (document.getElementById("remember").checked) {
+            localStorage.setItem("domain", document.getElementById("domain").value);
+            localStorage.setItem("username", document.getElementById("username").value);
+        } else {
+            localStorage.clear();
+        }
+        let xhr = new XMLHttpRequest();
+        xhr.responseType = 'json';
+        xhr.onload = function () {
+            if (xhr.status !== 200) {
+                alert(`Error ${xhr.status}: ${xhr.statusText}`);
+            } else if (xhr.response.Status === 0 && xhr.response.Answer && xhr.response.Answer.length > 0 && xhr.response.Answer[0].type === 64) {
+                let data = xhr.response.Answer[0].data;
+                console.log(data);
+                let z = data.split(" ").map(e => parseInt(e, 16));
+                let record = parseSVCB(z);
+                console.log(record);
+                if (record.priority === 0) {
+                    alert("暂不支持别名模式");
+                    return;
+                }
+                if (record.ip !== "" && record.port !== 0) {
+                    let fileContent = encodeURIComponent("full address:s:" + record.ip + ":" + record.port + "\n" + "username:s:" + document.getElementById("username").value);
+                    showMessage(record.ip + ":" + record.port, "success", `<a href="data:application/octet-stream;charset=utf-8,${fileContent}" download="${document.getElementById("domain").value}.rdp" style="user-select: none;">下载文件</a>`);
+                    let link = document.createElement("a");
+                    link.href = "rdp://full%20address=s," + encodeURIComponent(record.ip + ":" + record.port) + "&username=s," + encodeURIComponent(document.getElementById("username").value);
+                    link.click();
+                } else {
+                    alert("IP 和端口必须在同一条 DNS 记录上定义");
+                }
+            } else {
+                alert(`未找到 DNS 记录`);
+            }
+        };
+        xhr.onerror = function (e) {
+            showMessage("网络异常", "danger");
+        };
+        xhr.ontimeout = function () {
+            showMessage("请求超时", "danger");
+        };
+        xhr.open("GET", "/api/dns-query?name=" + document.getElementById("domain").value + "&type=SVCB");
+        xhr.setRequestHeader("Accept", "application/dns-json");
+        xhr.send();
+    });
+</script>
+</body>
+</html>
